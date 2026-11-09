@@ -21,13 +21,14 @@
   },
   "vars": {
     "GITHUB_CLIENT_ID": "Iv1.436da58906364f96",
-    "GITHUB_CALLBACK_ORIGIN": "https://fink-migration-preview.opral.workers.dev",
-    "WORKERS_SUBDOMAIN": "opral"
+    "GITHUB_CALLBACK_ORIGIN": "https://fink.inlang.com",
+    "WORKERS_SUBDOMAIN": "generaltranslation"
   },
   "secrets": {
     "required": [
       "GITHUB_CLIENT_SECRET",
       "SESSION_SECRET"
     ]
-  }
+  },
+  "account_id": "00246eb74c164b5dbee7d3ee028463c7"
 }

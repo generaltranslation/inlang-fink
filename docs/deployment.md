@@ -1,54 +1,44 @@
 # Deploying Fink
 
-Maintainer notes: how Fink is deployed to Cloudflare, how secrets are managed and how the repository was extracted from `opral/inlang`.
+## General Translation production
 
-## Cloudflare deployment
-
-Workers Static Assets serves the SPA. The Worker needs no paid storage service. Hosting remains subject to Cloudflare's free-plan quotas. The SDK's 81 MiB Lix engine exceeds the per-asset limit: the Vite adapter emits a roughly 19 MiB gzip asset and decompresses it in the browser before WebAssembly compilation. The build rejects an incompatible upstream loader change. SDK and Lix versions are pinned.
-
-Deployment credentials come from **Infisical**, using GitHub Actions OIDC. No long-lived Infisical credential is stored in GitHub. Create a Fink folder in your Infisical project containing:
-
-| Infisical secret | Value |
-| --- | --- |
-| `CLOUDFLARE_API_TOKEN` | Token with Workers Scripts edit access for the Opral account |
-| `GITHUB_CLIENT_SECRET` | Existing Inlang App's OAuth client secret |
-| `SESSION_SECRET` | Random secret with at least 32 characters, shared across Workers |
-| `GITHUB_CLIENT_ID` (optional) | Override the public Inlang App client ID in `wrangler.jsonc` |
-
-Create separate Infisical OIDC identities for preview and production, with read access to this folder. Use issuer `https://token.actions.githubusercontent.com`, audience `https://github.com/opral`, and bind the `repository` claim to `opral/inlang-fink`. Bind `sub` to `repo:opral/inlang-fink:environment:preview` or `repo:opral/inlang-fink:environment:production`, respectively.
-
-Set these **GitHub repository variables**:
-
-| Variable | Value |
-| --- | --- |
-| `INFISICAL_PROJECT_SLUG` | Infisical project slug |
-| `INFISICAL_PREVIEW_IDENTITY_ID` | Preview OIDC identity UUID |
-| `INFISICAL_PRODUCTION_IDENTITY_ID` | Production OIDC identity UUID |
-| `INFISICAL_ENVIRONMENT` (optional) | Secret environment slug; defaults to `prod` |
-| `INFISICAL_SECRET_PATH` (optional) | Secret folder; defaults to `/fink` |
-| `INFISICAL_DOMAIN` (optional) | Infisical origin; defaults to `https://app.infisical.com` |
-
-The deploy script supplies only the GitHub client secret and session secret to Worker bindings through a private temporary file, then deletes the file. The Cloudflare API token is used only to authorize deployment. CI fetches secrets after building and testing the SPA.
-
-The existing App needs these callback URLs, next to its live (Render) callback:
-
-- `https://fink-migration-preview.opral.workers.dev/api/auth/callback`: the stable callback Worker, set as `GITHUB_CALLBACK_ORIGIN` in `wrangler.jsonc`. Login on any workers.dev origin (`fink.opral.workers.dev`, PR previews) goes through it. It relays the sealed session to the origin that started the login. Credentials are never sent in browser-readable JSON. Only `fink.inlang.com`, `fink.opral.workers.dev`, `fink-pr-<number>.opral.workers.dev` and the `GITHUB_CALLBACK_ORIGIN` origin itself (e.g. `http://localhost:8787` locally) are accepted. Keep the `fink-migration-preview` Worker: workers.dev logins and PR previews depend on it.
-- `https://fink.inlang.com/api/auth/callback`: login on `fink.inlang.com` completes on that domain. Add it before DNS points at the Worker.
-
-Every Worker shares `SESSION_SECRET`, so a session sealed by the callback Worker opens on the others.
-
-The workflow builds, tests, and deploys same-repository PRs to `fink-pr-<number>.opral.workers.dev`, registers a GitHub environment URL, and deletes the Worker when the PR closes. Fork PRs run checks without receiving secrets. Merges to `main` deploy both the `fink` Worker and the stable callback Worker. A workflow dispatch also deploys production. Deployment fails with a setup message when required secrets are missing. This repository is configured to read the Inlang project (`inlang-mzyi`), production environment, `/fink` folder.
-
-For manual deployment, sign in to Infisical and inject the same folder's secrets (replace the project ID, environment and path with your configured values):
+Deploy only to account `00246eb74c164b5dbee7d3ee028463c7`, explicitly set as `CLOUDFLARE_ACCOUNT_ID`. The deploy script rejects a different account ID. Use Node.js 22+ and pnpm 10.23.0 with the frozen lockfile. Wrangler is pinned to 4.148.0.
 
 ```sh
-infisical login
-infisical run --projectId <project-id> --env prod --path /fink -- pnpm deploy:preview
+pnpm install --frozen-lockfile
+pnpm build
+CLOUDFLARE_ACCOUNT_ID=00246eb74c164b5dbee7d3ee028463c7 pnpm exec wrangler deploy --config wrangler.jsonc --name fink --domain fink.inlang.com --secrets-file /private/path/fink-worker-secrets.json
 ```
 
-`pnpm deploy:preview` updates the stable preview Worker. `pnpm deploy:production` updates both production and the stable callback Worker. Both commands require Infisical's three deployment secrets in the environment and build before deploying.
+The private JSON file must contain `GITHUB_CLIENT_SECRET` and a newly generated `SESSION_SECRET` of at least 32 characters. Keep values in 1Password and inject them securely; never commit or print them. Wrangler OAuth or a destination-scoped Cloudflare API token authorizes deployment and is not a Worker binding. `scripts/deploy.mjs` accepts the two secrets through the environment, writes a mode-0600 temporary secrets file, strips them from the child environment, and deletes the file after deployment.
 
-Switching `fink.inlang.com` and retiring Render are separate rollout steps after live sign-in/push validation. `wrangler.jsonc` attaches no route or custom domain, and a test keeps it that way: every Worker deploys with it, and Wrangler in CI replaces existing domains and DNS records without asking. To switch, add the `fink.inlang.com` callback URL above, delete the `fink` CNAME to Render in the `inlang.com` zone, and add `fink.inlang.com` as a Custom Domain of the `fink` Worker (Workers & Pages → fink → Settings → Domains & Routes). Do the last two steps back to back: resolvers that look the name up in between can cache "no such name" for up to 30 minutes (the zone's negative-cache TTL). Deploys leave Custom Domains that the config doesn't declare in place. Afterwards, remove `fink.inlang.com` from the Render service. To declare it in code instead, pass `--domain fink.inlang.com` in `scripts/deploy.mjs` for the `fink` target only.
+Production uses the transferred, General Translation-owned `inlang` GitHub App, ID `409404`, client ID `Iv1.436da58906364f96`. The production callback URL registered with that App must be:
+
+`https://fink.inlang.com/api/auth/callback`
+
+`GITHUB_CALLBACK_ORIGIN=https://fink.inlang.com` uses the production Worker as the stable callback for buyer-owned workers.dev previews too. `WORKERS_SUBDOMAIN=generaltranslation` limits the accepted preview origins to this destination account. No Opral callback Worker is required. Production and any optional previews must share the new session secret to relay login between origins.
+
+The Worker serves `worker/index.ts` and the `dist` asset directory bound as `ASSETS`. Preserve SPA fallback and run-worker-first paths `/api/*`, `/ingest/*`, `/docs/*`, `/compare/*`. Compatibility date is `2026-10-07` with `nodejs_compat`. No KV, R2, D1, Durable Object, queue, or service bindings are required.
+
+The SDK's large Lix engine is compressed by the Vite adapter into a roughly 19 MiB gzip asset and decompressed in the browser before WASM compilation. The build validates the upstream loader shape and `prepare-assets.mjs` excludes oversized originals from upload. SDK and Lix versions remain pinned.
+
+`pnpm deploy:production` builds and deploys `fink` with its production Custom Domain. Optional preview targets do not attach that domain.
+
+## GitHub Actions environments
+
+The workflow uses the repository's `production` and `preview` deployment environments. Store these environment secrets in each:
+
+- `CLOUDFLARE_API_TOKEN`: a General Translation-owned API token scoped to destination account `00246eb74c164b5dbee7d3ee028463c7`. Production needs access to deploy `fink` and manage its Custom Domain in the `inlang.com` zone. Preview deployment and cleanup need access to create, update, and delete `fink-pr-*` Workers in the destination account.
+- `FINK_GITHUB_CLIENT_SECRET`: the transferred `inlang` App's client secret, backed up in 1Password's `Sensitive Secrets / inlang GitHub App` item. The workflow exposes it as `GITHUB_CLIENT_SECRET` only in the deployment step; GitHub reserves secret names beginning with `GITHUB_`.
+- `FINK_SESSION_SECRET`: the existing destination production session-signing secret from the concealed `Fink SESSION_SECRET` field in that item. The workflow maps it to `SESSION_SECRET`. Production and previews must use the same value for the stable production callback flow.
+
+The account ID, App client ID, Workers subdomain, and callback origin are non-secret values pinned in the deployment workflow/configuration. No Infisical account, identity, repository variables, or OIDC grant is needed.
+
+Production deployment runs from `main`; keep the `production` environment's existing `main` branch policy. Same-repository pull requests deploy into `preview`; forks cannot deploy or run cleanup. Secret values are passed only to deployment/cleanup steps, after installation and tests. The cleanup job receives only the Cloudflare token. Both jobs use pnpm's frozen lockfile and the repository-pinned Wrangler.
+
+Changing environment secrets affects future deployments. Keep both environments synchronized when rotating the App client secret or session secret.
+
+Validate HTTPS, editor initialization, compressed WASM loading, GitHub sign-in, and read/update access to an explicitly authorized test repository before considering authentication complete.
 
 ## Extracted history
 

@@ -17,7 +17,7 @@ function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "fink-deploy-test-")); temporary.push(directory);
   const capture = join(directory, "capture.json");
   const recorder = join(directory, "record.cjs");
-  writeFileSync(recorder, `const fs = require('node:fs');\nconst args = process.argv.slice(2);\nconst file = args[args.indexOf('--secrets-file') + 1];\nfs.writeFileSync(process.env.CAPTURE, JSON.stringify({args, file, bindings: JSON.parse(fs.readFileSync(file)), mode: fs.statSync(file).mode & 511, auth: process.env.CLOUDFLARE_API_TOKEN, leaked: Boolean(process.env.GITHUB_CLIENT_SECRET || process.env.SESSION_SECRET)}));\nprocess.exit(Number(process.env.TEST_EXIT || 0));\n`);
+  writeFileSync(recorder, `const fs = require('node:fs');\nconst args = process.argv.slice(2);\nconst file = args[args.indexOf('--secrets-file') + 1];\nfs.writeFileSync(process.env.CAPTURE, JSON.stringify({args, file, bindings: JSON.parse(fs.readFileSync(file)), mode: fs.statSync(file).mode & 511, account: process.env.CLOUDFLARE_ACCOUNT_ID, auth: process.env.CLOUDFLARE_API_TOKEN, leaked: Boolean(process.env.GITHUB_CLIENT_SECRET || process.env.SESSION_SECRET)}));\nprocess.exit(Number(process.env.TEST_EXIT || 0));\n`);
   const binary = join(directory, "pnpm");
   const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
   writeFileSync(binary, `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(recorder)} "$@"\n`);
@@ -34,11 +34,26 @@ test("deployment keeps the API token out of bindings and removes private files a
     const data = JSON.parse(readFileSync(capture, "utf8"));
     expect(data.bindings).toEqual({ GITHUB_CLIENT_SECRET: env.GITHUB_CLIENT_SECRET, SESSION_SECRET: env.SESSION_SECRET });
     expect(data.auth).toBe(env.CLOUDFLARE_API_TOKEN);
+    expect(data.account).toBe("00246eb74c164b5dbee7d3ee028463c7");
     expect(data.mode).toBe(0o600);
     expect(data.leaked).toBe(false);
     expect(data.args.slice(0, 5)).toEqual(["exec", "wrangler", "deploy", "--name", "fink-pr-83"]);
+    expect(data.args).not.toContain("--domain");
     expect(existsSync(data.file)).toBe(false);
   }
+});
+test("production attaches its Custom Domain while a different account fails before Wrangler", () => {
+  const { capture, env } = fixture();
+  expect(spawnSync(process.execPath, [script, "fink"], { env }).status).toBe(0);
+  const data = JSON.parse(readFileSync(capture, "utf8"));
+  expect(data.args.slice(-2)).toEqual(["--domain", "fink.inlang.com"]);
+  expect(existsSync(data.file)).toBe(false);
+
+  const other = fixture();
+  const result = spawnSync(process.execPath, [script, "fink"], { env: { ...other.env, CLOUDFLARE_ACCOUNT_ID: "11a1a6f76d167248cc6987e978efb7e5" }, encoding: "utf8" });
+  expect(result.status).not.toBe(0);
+  expect(result.stderr).toContain("General Translation account");
+  expect(existsSync(other.capture)).toBe(false);
 });
 test("invalid targets and missing credentials fail before invoking Wrangler", () => {
   for (const args of [[], ["some-other-worker"]]) {
